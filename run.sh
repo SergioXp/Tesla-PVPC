@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Get version from source of truth (auto_charge/__init__.py)
-APP_VERSION=$(python3 -c "from auto_charge import __version__; print(__version__)" 2>/dev/null || echo "0.1.0")
+APP_VERSION=$(python3 -c "from auto_charge import __version__; print(__version__)" 2>/dev/null || echo "0.5.0")
 
 echo "=============================================="
 echo "  Tesla-PVPC v${APP_VERSION} ⚡"

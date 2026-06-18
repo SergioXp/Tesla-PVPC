@@ -126,17 +126,35 @@ run.bat --init            # Windows
 ./run.sh --dry-run
 ```
 
-### 5. CLI Commands (while daemon runs)
+### 5. CLI Reference (all arguments)
 
-| Command | Description |
-|---------|-------------|
-| `./run.sh -b` | Start daemon in background |
-| `./run.sh --dashboard` | Live TUI dashboard (Ctrl+C to exit) |
-| `./run.sh --prices` | Show hourly electricity prices table |
-| `./run.sh --show-config` | Show current configuration |
-| `./run.sh --edit` | Edit a config field interactively |
-| `./run.sh --init` | Full setup wizard |
-| `./run.sh -b --dashboard` | Start daemon in bg + open dashboard immediately |
+| Argument | Alias | Description |
+|----------|-------|-------------|
+| _(no args)_ | | Start 24/7 daemon in foreground (or interactive menu) |
+| `--init` | | Interactive setup wizard (creates config.json + .env) |
+| `--once` | | Run a single planning + enforcement cycle, then exit |
+| `--background` | `-b` | Start daemon in background, terminal returns immediately |
+| `--dashboard` | | Live TUI dashboard (Ctrl+C to exit, reads daemon status) |
+| `--prices` | | Show hourly electricity prices table (from daemon or live) |
+| `--show-config` | | Display current configuration with source (`.env` / `config.json`) |
+| `--edit` | | Edit a single config field interactively |
+| `--debug` | | Force debug mode with simulated vehicle (no Tesla needed) |
+| `--initial-battery PCT` | | Starting battery % in debug mode (default: 35) |
+| `--dry-run` | | Read real car data, log what would happen, **block all write commands** |
+| `--verbose` | `-v` | Enable detailed debug logging |
+| `--version` | | Show script version (`v0.5.0`) and exit |
+| `--lang es\|en` | | Set interface language: `es` (Spanish) or `en` (English). Default: `es` |
+| `--config PATH` | | Use a custom config.json path (default: `./config.json`) |
+| `--help` | `-h` | Show full help with all arguments and examples |
+
+**Combinations:**
+
+| Command | Effect |
+|---------|--------|
+| `-b --dashboard` | Start daemon in background + open dashboard immediately |
+| `--debug --initial-battery 50` | Debug mode with battery starting at 50% |
+| `--once --verbose --dry-run` | One-shot: see everything the script would do, without touching the car |
+| `--once --verbose --debug` | One-shot with simulated vehicle and full logs |
 
 **Example `--prices` output:**
 ```

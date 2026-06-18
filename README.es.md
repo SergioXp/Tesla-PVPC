@@ -126,17 +126,35 @@ run.bat --init            # Windows
 ./run.sh --dry-run
 ```
 
-### 5. Comandos CLI (mientras el daemon corre)
+### 5. Referencia CLI (todos los argumentos)
 
-| Comando | Descripción |
-|---------|-------------|
-| `./run.sh -b` | Iniciar daemon en segundo plano |
-| `./run.sh --dashboard` | Dashboard TUI en vivo (Ctrl+C para salir) |
-| `./run.sh --prices` | Mostrar tabla de precios horarios |
-| `./run.sh --show-config` | Mostrar configuración actual |
-| `./run.sh --edit` | Editar un campo de configuración |
-| `./run.sh --init` | Asistente de configuración completo |
-| `./run.sh -b --dashboard` | Daemon en bg + dashboard inmediato |
+| Argumento | Alias | Descripción |
+|-----------|-------|-------------|
+| _(sin args)_ | | Iniciar daemon 24/7 en primer plano (o menú interactivo) |
+| `--init` | | Asistente interactivo de configuración (crea config.json + .env) |
+| `--once` | | Ejecutar un único ciclo de planificación + carga, luego salir |
+| `--background` | `-b` | Iniciar daemon en segundo plano, la terminal vuelve al instante |
+| `--dashboard` | | Panel TUI en vivo (Ctrl+C para salir, lee estado del daemon) |
+| `--prices` | | Mostrar tabla de precios horarios de la luz (del daemon o en directo) |
+| `--show-config` | | Mostrar configuración actual con fuente (🔒 `.env` / 📄 `config.json`) |
+| `--edit` | | Editar un campo de configuración de forma interactiva |
+| `--debug` | | Forzar modo debug con vehículo simulado (no necesita Tesla real) |
+| `--initial-battery PCT` | | % de batería inicial en modo debug (por defecto: 35) |
+| `--dry-run` | | Leer datos reales del coche, bloquear **todos** los comandos de escritura |
+| `--verbose` | `-v` | Activar logs detallados de depuración (DEBUG) |
+| `--version` | | Mostrar versión del script (`v0.5.0`) y salir |
+| `--lang es\|en` | | Cambiar idioma: `es` (español) o `en` (inglés). Por defecto: `es` |
+| `--config RUTA` | | Usar una ruta personalizada para config.json (por defecto: `./config.json`) |
+| `--help` | `-h` | Mostrar ayuda completa con todos los argumentos y ejemplos |
+
+**Combinaciones útiles:**
+
+| Comando | Efecto |
+|---------|--------|
+| `-b --dashboard` | Daemon en segundo plano + abrir dashboard inmediatamente |
+| `--debug --initial-battery 50` | Modo debug con batería inicial al 50% |
+| `--once --verbose --dry-run` | Un ciclo: ver todo lo que haría el script sin tocar el coche |
+| `--once --verbose --debug` | Un ciclo con vehículo simulado y logs completos |
 
 **Ejemplo de salida `--prices`:**
 ```
