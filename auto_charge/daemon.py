@@ -20,7 +20,7 @@ from auto_charge.planner import ChargePlanner, ChargingPlan
 from auto_charge.telegram_bot import TelegramBot, build_bot
 from auto_charge.tessie import TessieClient
 from auto_charge.debug_tessie import DebugTessieClient
-from auto_charge.utils import get_spain_tz, logger, now_spain, today_str, tomorrow_str
+from auto_charge.utils import get_spain_tz, logger, mask_token, now_spain, today_str, tomorrow_str
 
 
 class AutoChargeDaemon:
@@ -163,7 +163,7 @@ class AutoChargeDaemon:
             return f"❌ Clave no permitida: `{key}`\nPermitidas: {', '.join(sorted(allowed))}"
 
         try:
-            self.cfg.set_and_save(key, value)
+            self.cfg.set(key, value)
             # Reload the planner with new config
             self.planner = ChargePlanner(self.cfg)
             return f"✅ `{key}` = `{value}`\nLos cambios se aplicarán en el próximo ciclo."
@@ -519,7 +519,6 @@ class AutoChargeDaemon:
                     )
             return
 
-        deficit = expected - actual_pct
         if deficit > 3.0:
             logger.warning(
                 f"Behind schedule at hour {current_hour}: "

@@ -46,16 +46,6 @@ class VehicleState:
         """Current charging power in kW."""
         return float(self._raw.get("charge_state", {}).get("charger_power", 0))
 
-    @property
-    def time_to_full_charge(self) -> float:
-        """Hours to full charge at current rate."""
-        return float(self._raw.get("charge_state", {}).get("time_to_full_charge", 0))
-
-    @property
-    def battery_level_pct(self) -> float:
-        """Usable battery level in percent (0-100). Alias for battery_pct."""
-        return self.battery_pct
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "battery_pct": self.battery_pct,

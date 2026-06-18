@@ -29,8 +29,6 @@ class DebugTessieClient:
         self._charge_limit: float = float(config.min_battery_pct)
         self._plugged_in: bool = True
         self._last_state_time: Optional[datetime] = None
-        self._action_log: list = []
-
         logger.info(f"[DEBUG] Simulated vehicle created: battery={initial_battery_pct:.1f}%, "
                      f"plugged_in=True, charge_limit={self._charge_limit:.0f}%")
 
@@ -108,7 +106,6 @@ class DebugTessieClient:
         now = now_spain()
         msg = f"[DEBUG] → SIMULATED API CALL: start_charge() at {now.strftime('%H:%M:%S')}"
         logger.info(msg)
-        self._action_log.append(msg)
         self._charging = True
         self._last_state_time = now
         return True
@@ -117,28 +114,13 @@ class DebugTessieClient:
         now = now_spain()
         msg = f"[DEBUG] → SIMULATED API CALL: stop_charge() at {now.strftime('%H:%M:%S')}"
         logger.info(msg)
-        self._action_log.append(msg)
         self._charging = False
         return True
 
     def set_charge_limit(self, percent: int) -> bool:
         msg = f"[DEBUG] → SIMULATED API CALL: set_charge_limit({percent}%)"
         logger.info(msg)
-        self._action_log.append(msg)
         self._charge_limit = float(percent)
         return True
 
-    def set_plugged_in(self, state: bool) -> None:
-        """Set whether the simulated car is plugged in (for testing edge cases)."""
-        self._plugged_in = state
-        logger.info(f"[DEBUG] Simulated plug state set to: {'plugged' if state else 'unplugged'}")
 
-    def set_battery_pct(self, pct: float) -> None:
-        """Override simulated battery percentage (for testing replanning)."""
-        self._battery_pct = max(0.0, min(pct, 100.0))
-        self._last_state_time = now_spain()
-        logger.info(f"[DEBUG] Simulated battery manually set to: {self._battery_pct:.1f}%")
-
-    def get_action_log(self) -> list:
-        """Return the log of all simulated API calls made so far."""
-        return list(self._action_log)

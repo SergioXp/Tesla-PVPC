@@ -3,7 +3,7 @@
 import logging
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Optional
 
 # Central timezone reference
 SPAIN_TZ = timezone(timedelta(hours=2))  # CEST (UTC+2). For CET (winter): timedelta(hours=1)
@@ -71,3 +71,16 @@ def setup_logger(name: str = "autocharge", level: int = logging.INFO) -> logging
 
 
 logger = setup_logger()
+
+
+def mask_token(value: Any) -> str:
+    """Mask a sensitive token/value for display, showing only first/last chars."""
+    if value is None:
+        return "(vacío)"
+    s = str(value)
+    if not s:
+        return "(vacío)"
+    if len(s) > 12:
+        return s[:8] + "..." + s[-2:]
+    else:
+        return s[:4] + "..."

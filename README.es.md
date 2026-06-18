@@ -75,22 +75,19 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edita `.env` con tus tokens y preferencias:
+Edita `.env` con tus tokens (la configuración no sensible como precios, horarios, etc. va en `config.json` mediante `--init`):
 
 ```bash
-TESSIE_TOKEN=tk_your_tessie_token
-VIN=LRW3E7FSXXXXXXXXX
-ESIOS_TOKEN=your_esios_token
-MAX_PRICE_CENTS_PER_KWH=10
-MAX_CHARGER_POWER_KW=3.3
-BATTERY_CAPACITY_KWH=75
-MIN_BATTERY_PCT=70
-TARGET_TIME=19:00
-STRICT_MODE=true
-CHARGING_EFFICIENCY=0.9
-CHECK_INTERVAL_MINUTES=15
-TELEGRAM_BOT_TOKEN=123456:ABC...
-TELEGRAM_CHAT_ID=123456789
+TESSIE_TOKEN=tk_f4k3_t0k3n_xxxx
+VIN=LRW00000000000000
+ESIOS_TOKEN=0000fake0000token0000
+TELEGRAM_BOT_TOKEN=0000000000:ABCfakeDEF000000
+TELEGRAM_CHAT_ID=000000000
+```
+
+Luego configura los ajustes no sensibles con:
+```bash
+./run.sh --init
 ```
 
 ### 4. Ejecución
@@ -238,6 +235,13 @@ Consulta [`install/windows-instructions.txt`](install/windows-instructions.txt) 
 5. **Modo estricto**: Si no hay suficientes horas baratas, añade horas caras para garantizar el objetivo
 6. **Modo flexible**: Solo usa horas baratas — puede no alcanzar el objetivo
 7. **Seguimiento**: % de batería esperado calculado por hora; replanifica si >3% por detrás
+
+## Hecho con Vibecoding 🤖
+
+Este proyecto ha sido desarrollado con **vibecoding** — desarrollo asistido por IA donde la
+creatividad humana se combina con la aceleración de la inteligencia artificial. Cada línea
+se ha creado mediante un diálogo iterativo entre el desarrollador y agentes de IA,
+haciendo que el software complejo sea accesible para cualquiera con una visión.
 
 ## Licencia
 

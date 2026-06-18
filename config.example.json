@@ -7,9 +7,5 @@
     "strict_mode": true,
     "charging_efficiency": 0.9,
     "check_interval_minutes": 15,
-    "telegram": {
-        "bot_token": "",
-        "chat_id": ""
-    },
-    "_comment": "Tokens go in .env, not here. See .env.example"
+    "_comment": "Tokens (TESSIE_TOKEN, ESIOS_TOKEN, VIN, Telegram) go in .env. See .env.example"
 }

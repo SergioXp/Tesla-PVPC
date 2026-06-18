@@ -2,11 +2,11 @@
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from auto_charge.config import Config
-from auto_charge.utils import get_spain_tz, logger, now_spain
+from auto_charge.utils import logger, now_spain
 
 
 @dataclass
@@ -21,14 +21,6 @@ class ChargingSlot:
     @property
     def duration_hours(self) -> float:
         return float(self.end_hour - self.start_hour)
-
-    def start_datetime(self, date_str: str) -> datetime:
-        spain_tz = get_spain_tz()
-        return datetime.strptime(f"{date_str} {self.start_hour:02d}:00", "%Y-%m-%d %H:%M").replace(tzinfo=spain_tz)
-
-    def end_datetime(self, date_str: str) -> datetime:
-        spain_tz = get_spain_tz()
-        return datetime.strptime(f"{date_str} {self.end_hour:02d}:00", "%Y-%m-%d %H:%M").replace(tzinfo=spain_tz)
 
     def __repr__(self) -> str:
         return (

@@ -1,8 +1,13 @@
-"""Configuration manager. Loads from .env and/or config.json with validation."""
+"""Configuration manager. Loads from .env and/or config.json with validation.
+
+Sensitive data (tokens, VIN) goes in .env.
+Non-sensitive settings (prices, times, etc.) go in config.json.
+"""
 
 import json
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional, Set
 
 try:
     from dotenv import load_dotenv
@@ -15,6 +20,33 @@ from auto_charge.utils import logger
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 EXAMPLE_CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.example.json")
+ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+
+# Which config keys are secrets (tokens, VIN) and should ALWAYS go in .env
+SECRET_KEYS: Set[str] = {
+    "tessie_token",
+    "vin",
+    "esios_token",
+    "telegram.bot_token",
+    "telegram.chat_id",
+}
+
+# Reverse map: config_key → ENV_VAR
+CONFIG_TO_ENV: Dict[str, str] = {
+    "tessie_token": "TESSIE_TOKEN",
+    "vin": "VIN",
+    "esios_token": "ESIOS_TOKEN",
+    "max_price_cents_per_kwh": "MAX_PRICE_CENTS_PER_KWH",
+    "max_charger_power_kw": "MAX_CHARGER_POWER_KW",
+    "battery_capacity_kwh": "BATTERY_CAPACITY_KWH",
+    "min_battery_pct": "MIN_BATTERY_PCT",
+    "target_time": "TARGET_TIME",
+    "strict_mode": "STRICT_MODE",
+    "charging_efficiency": "CHARGING_EFFICIENCY",
+    "check_interval_minutes": "CHECK_INTERVAL_MINUTES",
+    "telegram.bot_token": "TELEGRAM_BOT_TOKEN",
+    "telegram.chat_id": "TELEGRAM_CHAT_ID",
+}
 
 # Mapping: ENV_VAR → (config_key, type_coercion)
 # type_coercion: "str", "int", "float", "bool"
@@ -71,9 +103,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 REQUIRED_FIELDS = [
-    "tessie_token",
-    "vin",
-    "esios_token",
     "max_price_cents_per_kwh",
     "max_charger_power_kw",
     "battery_capacity_kwh",
@@ -83,6 +112,38 @@ REQUIRED_FIELDS = [
     "charging_efficiency",
     "check_interval_minutes",
 ]
+
+
+def _set_env_var(env_var: str, value: str) -> None:
+    """Set or update a variable in the .env file.
+
+    Creates the file if it doesn't exist. Preserves existing comments and order.
+    """
+    lines: List[str] = []
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH, "r") as f:
+            lines = f.readlines()
+
+    # Find and replace existing assignment, or append
+    found = False
+    new_lines: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Match KEY=value or export KEY=value (ignore comments)
+        if re.match(rf"^(export\s+)?{re.escape(env_var)}=", stripped):
+            new_lines.append(f"{env_var}={value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines.append("\n")
+        new_lines.append(f"{env_var}={value}\n")
+
+    os.makedirs(os.path.dirname(ENV_PATH) or ".", exist_ok=True)
+    with open(ENV_PATH, "w") as f:
+        f.writelines(new_lines)
 
 
 class Config:
@@ -102,17 +163,84 @@ class Config:
                 user_config = json.load(f)
             self._data.update(user_config)
 
-        # 2. Override with .env values (env vars take priority over config.json)
+        # 2. Migrate tokens from config.json → .env (secrets don't belong in config.json)
+        self._migrate_tokens()
+
+        # 3. Override with .env values (env vars take priority over config.json)
         self._merge_env()
 
-        # 3. If no tokens at all: check if we should run in debug mode
-        if not has_config_json and not self._data.get("tessie_token"):
+        # 4. If no tokens at all: check if we should run in debug mode
+        if not self._data.get("tessie_token"):
             logger.warning(
                 "⚠️  No Tessie token found. Running in DEBUG MODE (simulated vehicle). "
-                "Add TESSIE_TOKEN to .env or config.json to use a real Tesla."
+                "Add TESSIE_TOKEN to .env to use a real Tesla."
             )
 
         self._validate()
+
+    def _get_nested(self, key: str) -> Any:
+        """Get a value from _data using dot notation (e.g. 'telegram.bot_token')."""
+        keys = key.split(".")
+        d = self._data
+        for k in keys:
+            if isinstance(d, dict):
+                d = d.get(k)
+            else:
+                return None
+        return d
+
+    def _migrate_tokens(self) -> None:
+        """Migrate any tokens still in config.json to .env, then remove from config.json.
+        This runs once per load to transition users from the old config.json-only setup.
+        Handles both flat keys (tessie_token) and nested keys (telegram.bot_token).
+        """
+        dirty = False
+        for config_key, env_var in CONFIG_TO_ENV.items():
+            if config_key not in SECRET_KEYS:
+                continue
+            value = self._get_nested(config_key)
+            if value and not os.environ.get(env_var):
+                # Token exists in config.json but not in .env → migrate
+                _set_env_var(env_var, str(value))
+                logger.info(f"🔒 Migrated {env_var} from config.json to .env")
+                dirty = True
+                # Also set in current environment so _merge_env picks it up
+                os.environ[env_var] = str(value)
+
+        if dirty:
+            # Clean tokens from _data and save config.json without them
+            self._strip_tokens()
+            if os.path.exists(self._path):
+                with open(self._path, "w") as f:
+                    json.dump(self._strip_tokens_from_dict(dict(self._data)), f, indent=4, ensure_ascii=False)
+
+    def _strip_tokens_from_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove secret keys from a config dict."""
+        result = {}
+        for k, v in data.items():
+            if k in SECRET_KEYS:
+                continue
+            if k == "telegram" and isinstance(v, dict):
+                # Keep telegram section but remove nested secret keys
+                cleaned = {}
+                for tk, tv in v.items():
+                    if f"telegram.{tk}" not in SECRET_KEYS:
+                        cleaned[tk] = tv
+                if cleaned:
+                    result[k] = cleaned
+            else:
+                result[k] = v
+        return result
+
+    def _strip_tokens(self) -> None:
+        """Remove secret keys from in-memory _data."""
+        for key in list(SECRET_KEYS):
+            if "." in key:
+                parts = key.split(".")
+                if parts[0] in self._data and isinstance(self._data[parts[0]], dict):
+                    self._data[parts[0]].pop(parts[1], None)
+            else:
+                self._data.pop(key, None)
 
     def _merge_env(self) -> None:
         """Merge environment variables into config, overriding any existing values."""
@@ -135,8 +263,7 @@ class Config:
                 d = d.setdefault(k, {})
             d[keys[-1]] = coerced
 
-        if self._data.get("tessie_token") or self._data.get("esios_token"):
-            logger.info("Configuration loaded from .env (env vars override config.json).")
+        logger.info("Configuration loaded from .env (env vars override config.json).")
 
     def _validate(self) -> None:
         missing = [k for k in REQUIRED_FIELDS if not self._data.get(k) and self._data.get(k) != 0]
@@ -153,10 +280,12 @@ class Config:
             raise ValueError("target_time must be in HH:MM format (e.g., '19:00')")
 
     def save(self) -> None:
-        """Persist current config to disk (preserving comments is not supported)."""
-        with open(self._path, "w") as f:
-            json.dump(self._data, f, indent=4, ensure_ascii=False)
-        logger.info("Configuration saved.")
+        """Persist non-sensitive config to config.json (tokens stay in .env)."""
+        data_to_save = self._strip_tokens_from_dict(self._data)
+        if data_to_save:
+            with open(self._path, "w") as f:
+                json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+            logger.info("Configuration saved (tokens kept in .env).")
 
     # --- Getters ---
 
@@ -242,16 +371,29 @@ class Config:
     # --- Setters ---
 
     def set(self, key: str, value: Any) -> None:
-        """Set a config value. Supports nested keys with dot notation (e.g., 'telegram.bot_token')."""
-        keys = key.split(".")
-        d = self._data
-        for k in keys[:-1]:
-            d = d.setdefault(k, {})
-        d[keys[-1]] = value
-        self.save()
-
-    def set_and_save(self, key: str, value: Any) -> None:
-        self.set(key, value)
+        """Set a config value. Secrets go to .env, non-secrets to config.json."""
+        if key in SECRET_KEYS:
+            # Save to .env
+            env_var = CONFIG_TO_ENV.get(key)
+            if env_var:
+                _set_env_var(env_var, str(value))
+                # Also update current environment so subsequent _merge_env picks it up
+                os.environ[env_var] = str(value)
+            # Update in-memory dict
+            keys = key.split(".")
+            d = self._data
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+            logger.info(f"🔒 {key} saved to .env")
+        else:
+            # Save to config.json as before
+            keys = key.split(".")
+            d = self._data
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+            d[keys[-1]] = value
+            self.save()
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self._data)

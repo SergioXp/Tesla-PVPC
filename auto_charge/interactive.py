@@ -8,9 +8,15 @@ from typing import Any, Callable, Dict
 
 import questionary
 
-from auto_charge.config import CONFIG_PATH, DEFAULT_CONFIG
+from auto_charge.config import (
+    CONFIG_PATH,
+    DEFAULT_CONFIG,
+    SECRET_KEYS,
+    _set_env_var,
+    CONFIG_TO_ENV,
+)
 from auto_charge.i18n import t
-from auto_charge.utils import now_spain
+from auto_charge.utils import mask_token, now_spain
 
 # =============================================================================
 # Shared helpers
@@ -76,15 +82,7 @@ def _validate_hhmm(value: str) -> bool:
         return False
 
 
-def _mask_token(value: Any) -> str:
-    if value is None:
-        return "(vacío)"
-    s = str(value)
-    if len(s) > 12:
-        return s[:8] + "..." + s[-2:]
-    elif s:
-        return s[:4] + "..."
-    return "(vacío)"
+
 
 
 # =============================================================================
@@ -163,7 +161,7 @@ def run_interactive_init(config_path: str = CONFIG_PATH) -> None:
         if ftype == "bool":
             display = str(current).lower()
         elif ("token" in key.lower() or key == "vin") and current:
-            display = _mask_token(current)
+            display = mask_token(current)
         else:
             display = str(current) if current else "(vacío)"
 
@@ -236,20 +234,50 @@ def run_interactive_init(config_path: str = CONFIG_PATH) -> None:
                 questionary.print("")
                 break
 
-    # Save
+    # Save: tokens go to .env, non-sensitive goes to config.json
     questionary.print(f"{'='*60}")
+
+    # 1. Save secrets to .env
+    env_path = os.path.join(os.path.dirname(config_path), ".env")
+    for key, *_ in _FIELDS:
+        if key in SECRET_KEYS:
+            val = _get_nested(data, key)
+            env_var = CONFIG_TO_ENV.get(key)
+            if env_var and val:
+                _set_env_var(env_var, str(val))
+
+    # 2. Save non-sensitive to config.json
+    non_secret_data = {}
+    for k, v in data.items():
+        if k in SECRET_KEYS:
+            continue
+        if k == "telegram" and isinstance(v, dict):
+            cleaned = {}
+            for tk, tv in v.items():
+                if f"telegram.{tk}" not in SECRET_KEYS:
+                    cleaned[tk] = tv
+            if cleaned:
+                non_secret_data[k] = cleaned
+        else:
+            non_secret_data[k] = v
+
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+        json.dump(non_secret_data, f, indent=4, ensure_ascii=False)
 
-    questionary.print(f"✅ {t('init.saved')}: {config_path}", style="green")
+    if os.path.exists(env_path):
+        questionary.print(f"✅ {t('init.saved')}: config.json + .env con tokens", style="green")
+    else:
+        questionary.print(f"✅ {t('init.saved')}: config.json", style="green")
+        questionary.print(f"   ℹ️  Crea .env a partir de .env.example para los tokens", style="yellow")
     questionary.print("")
     questionary.print(f"{t('init.summary')}:", style="bold")
     for key, *_ in _FIELDS:
         val = _get_nested(data, key)
         if ("token" in key.lower() or key == "vin") and val:
-            val = _mask_token(val)
-        questionary.print(f"  {key}: {val}")
+            val = mask_token(val)
+        source = "🔒 .env" if key in SECRET_KEYS else "📄 config.json"
+        questionary.print(f"  {key}: {val}  ({source})")
     questionary.print("")
     questionary.print(f"🚀 {t('init.ready')}: python tesla_pvpc.py")
     questionary.print(f"   {t('init.try-debug')}")
@@ -313,7 +341,7 @@ def run_interactive_edit(config_path: str = CONFIG_PATH) -> None:
         for field in fields:
             current = _get_nested(data, field["key"])
             if ("token" in field["key"].lower() or field["key"] == "vin") and current:
-                display = _mask_token(current)
+                display = mask_token(current)
             elif isinstance(current, bool):
                 display = "true" if current else "false"
             else:
@@ -346,7 +374,7 @@ def run_interactive_edit(config_path: str = CONFIG_PATH) -> None:
     questionary.print("")
     questionary.print(f"{'─'*60}")
     questionary.print(f"✏️  {t('edit.editing')}: {key}", style="bold")
-    questionary.print(f"   {t('edit.current')}: {_mask_token(current) if is_secure and current else current}")
+    questionary.print(f"   {t('edit.current')}: {mask_token(current) if is_secure and current else current}")
     questionary.print(f"   {t('edit.type')}: {current_type}")
     questionary.print("")
 
@@ -396,15 +424,25 @@ def run_interactive_edit(config_path: str = CONFIG_PATH) -> None:
         if not _validate_field(key, new_val):
             return
 
-    # Save
+    # Save: tokens to .env, rest to config.json
     _set_nested(data, key, new_val)
     try:
-        with open(config_path, "w") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        display_new = _mask_token(new_val) if is_secure and new_val else str(new_val)
-        questionary.print(f"")
-        questionary.print(f"✅ {t('edit.saved')}", style="green")
-        questionary.print(f"   {key}: {_mask_token(current) if is_secure and current else current} → {display_new}")
+        if is_secure or key in SECRET_KEYS:
+            # Save to .env
+            env_var = CONFIG_TO_ENV.get(key)
+            if env_var:
+                _set_env_var(env_var, str(new_val))
+            display_new = mask_token(new_val) if is_secure and new_val else str(new_val)
+            questionary.print(f"")
+            questionary.print(f"✅ {t('edit.saved')} → 🔒 .env", style="green")
+            questionary.print(f"   {key}: {mask_token(current) if is_secure and current else current} → {display_new}")
+        else:
+            with open(config_path, "w") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            display_new = mask_token(new_val) if is_secure and new_val else str(new_val)
+            questionary.print(f"")
+            questionary.print(f"✅ {t('edit.saved')} → 📄 config.json", style="green")
+            questionary.print(f"   {key}: {current} → {display_new}")
         questionary.print("")
         # Offer to edit another
         again = questionary.confirm(t("edit.another"), default=False).ask()

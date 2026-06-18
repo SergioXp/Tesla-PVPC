@@ -8,12 +8,13 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
-from auto_charge.config import CONFIG_PATH, DEFAULT_CONFIG
+from auto_charge import __version__
+from auto_charge.config import CONFIG_PATH, DEFAULT_CONFIG, SECRET_KEYS
 from auto_charge.daemon import AutoChargeDaemon
 from auto_charge.i18n import set_lang, t
-from auto_charge.utils import logger, now_spain
+from auto_charge.utils import logger, mask_token, now_spain
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--background", "-b", action="store_true", help=t("cli.background"))
     parser.add_argument("--prices", action="store_true", help=t("cli.prices"))
     parser.add_argument("--dashboard", action="store_true", help=t("cli.dashboard"))
+    parser.add_argument("--version", action="store_true", help=t("cli.version"))
     parser.add_argument("--lang", type=str, default="es", choices=["es", "en"], help=t("cli.lang"))
     return parser.parse_args()
 
@@ -110,9 +112,6 @@ def _kill_existing_instances() -> None:
     Uses SIGTERM first, then waits briefly, then SIGKILL if still alive.
     Only kills processes with a different PID (not itself).
     """
-    import signal
-    import subprocess
-
     my_pid = os.getpid()
 
     try:
@@ -205,6 +204,13 @@ def main() -> None:
 
     # Set language
     set_lang(args.lang)
+
+    # --- --version ---
+    if args.version:
+        print(f"Tesla-PVPC v{__version__}")
+        print("Carga inteligente del Tesla con precios PVPC de España.")
+        print("MIT License - github.com/SergioXp/Tesla-PVPC")
+        return
 
     if args.verbose:
         from auto_charge.utils import setup_logger
@@ -334,28 +340,31 @@ def main() -> None:
             logger.info(t("daemon.background"))
             if args.dashboard:
                 # Combo -b --dashboard: fork daemon, luego abre dashboard
-                pid = os.fork()
-                if pid > 0:
-                    # Padre: esperar a que el daemon escriba estado (max 10s)
-                    for _ in range(20):
-                        time.sleep(0.5)
-                        try:
-                            with open("/tmp/autocharge-status.json") as _f:
-                                _st = json.load(_f)
-                                if _st.get("prices_summary") or _st.get("plan") or _st.get("vehicle"):
-                                    break
-                        except (IOError, json.JSONDecodeError):
-                            pass
-                    show_dashboard()
-                    sys.exit(0)
-                # Hijo: detached daemon
-                os.setsid()
-                pid2 = os.fork()
-                if pid2 > 0:
-                    sys.exit(0)
-                # Nieto: actualizar PID en status file (el daemon real)
-                from auto_charge.status import write_status
-                write_status(daemon_pid=os.getpid(), daemon_mode="daemon")
+                try:
+                    pid = os.fork()
+                    if pid > 0:
+                        # Padre: esperar a que el daemon escriba estado (max 10s)
+                        for _ in range(20):
+                            time.sleep(0.5)
+                            try:
+                                with open("/tmp/autocharge-status.json") as _f:
+                                    _st = json.load(_f)
+                                    if _st.get("prices_summary") or _st.get("plan") or _st.get("vehicle"):
+                                        break
+                            except (IOError, json.JSONDecodeError):
+                                pass
+                        show_dashboard()
+                        sys.exit(0)
+                    # Hijo: detached daemon
+                    os.setsid()
+                    pid2 = os.fork()
+                    if pid2 > 0:
+                        sys.exit(0)
+                    # Nieto: actualizar PID en status file (el daemon real)
+                    from auto_charge.status import write_status
+                    write_status(daemon_pid=os.getpid(), daemon_mode="daemon")
+                except (AttributeError, OSError):
+                    logger.warning("Background mode no disponible en este sistema. Ejecutando en primer plano.")
             else:
                 _daemonize()
 
@@ -599,8 +608,10 @@ def show_config(config_path: str = CONFIG_PATH) -> None:
                 bot = tg.get("bot_token", "")
                 cid = tg.get("chat_id", "")
                 label = t("show.not-configured")
-                print(f"  telegram.bot_token = {_mask(bot) if bot else f'({label})'}")
-                print(f"  telegram.chat_id   = {cid or f'({label})'}")
+                bot_src = "🔒 .env" if bot else ""
+                cid_src = "🔒 .env" if cid else ""
+                print(f"  telegram.bot_token = {mask_token(bot) if bot else f'({label})'} {bot_src}")
+                print(f"  telegram.chat_id   = {cid or f'({label})'} {cid_src}")
                 if bot and cid:
                     print(f"  → {t('show.telegram-active')} ✅")
                 else:
@@ -608,10 +619,12 @@ def show_config(config_path: str = CONFIG_PATH) -> None:
             else:
                 val = data.get(key, "")
                 if ("token" in key.lower() or key == "vin") and val:
-                    display = _mask(val)
+                    display = mask_token(val)
+                    src = "🔒 .env" if key in SECRET_KEYS else ""
                 else:
                     display = str(val)
-                print(f"  {key} = {display}")
+                    src = "📄 config.json"
+                print(f"  {key} = {display}  {src}")
         print()
 
     print(f"🐛 {t('show.mode')}:")
@@ -624,15 +637,7 @@ def show_config(config_path: str = CONFIG_PATH) -> None:
     print()
 
 
-def _mask(value: Any) -> str:
-    if value is None:
-        return "(vacío)"
-    s = str(value)
-    if len(s) > 12:
-        return s[:8] + "..." + s[-2:]
-    elif s:
-        return s[:4] + "..."
-    return "(vacío)"
+
 
 
 if __name__ == "__main__":

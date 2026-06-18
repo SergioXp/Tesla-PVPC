@@ -30,8 +30,9 @@ def _fetch_from_esios(date_str: str, token: str) -> Optional[Dict[int, float]]:
     url = f"{ESIOS_BASE_URL}/indicators/{PVPC_INDICATOR_ID}"
     params = {"start_date": f"{date_str}T00:00:00", "end_date": f"{date_str}T23:59:59"}
     headers = {
-        "Authorization": f"Bearer {token}",
+        "x-api-key": token,
         "Accept": "application/json; application/vnd.esios-api-v1+json",
+        "Content-Type": "application/json",
     }
 
     logger.info(f"ESIOS: fetching prices for {date_str}...")
