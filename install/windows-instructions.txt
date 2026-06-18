@@ -1,0 +1,40 @@
+# Windows Installation Instructions
+
+## Option 1: Windows Task Scheduler (run every 15 min as --once)
+
+1. Install Python 3.10+ from https://www.python.org/downloads/
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. Copy config.example.json to config.json and fill in your tokens.
+
+4. Open **Task Scheduler** (taskschd.msc)
+5. Create a new task:
+   - **General**: Name "Tesla-PVPC", check "Run whether user is logged on or not"
+   - **Triggers**: New → "Daily", start at 00:00, repeat every 15 minutes for 24 hours
+   - **Actions**: New → Start a program
+     - Program: `python3`
+     - Arguments: `C:\path\to\tesla-pvpc\tesla_pvpc.py --once`
+     - Start in: `C:\path\to\tesla-pvpc`
+
+## Option 2: NSSM (runs as a Windows service, 24/7 daemon)
+
+1. Download NSSM from https://nssm.cc/download
+2. Open a terminal (Administrator):
+   ```
+   nssm install Tesla-PVPC
+   ```
+3. In the GUI:
+   - **Application path**: `C:\path\to\python3.exe`
+   - **Arguments**: `C:\path\to\tesla-pvpc\tesla_pvpc.py`
+   - **Startup directory**: `C:\path\to\tesla-pvpc`
+4. `nssm start Tesla-PVPC`
+
+## Option 3: Start with Windows (startup folder)
+
+Create a .vbs or .bat file in the Startup folder
+(`shell:startup`) that runs:
+```
+pythonw C:\path\to\tesla-pvpc\tesla_pvpc.py
+```

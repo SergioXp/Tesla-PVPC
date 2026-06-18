@@ -1,0 +1,22 @@
+[Unit]
+Description=Tesla-PVPC - Optimize Tesla charging with Spanish electricity prices
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%u
+WorkingDirectory=/opt/tesla-pvpc
+ExecStart=/usr/bin/python3 /opt/tesla-pvpc/tesla_pvpc.py
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (optional, tighten as needed)
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

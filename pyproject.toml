@@ -1,0 +1,32 @@
+[project]
+name = "tesla-pvpc"
+version = "0.1.0"
+description = "Optimize Tesla charging with Spanish hourly electricity prices"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+readme = "README.md"
+
+dependencies = [
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "questionary>=2.1.1",
+]
+
+[project.scripts]
+tesla-pvpc = "tesla_pvpc:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["auto_charge"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "auto_charge/",
+    "tesla_pvpc.py",
+    "config.example.json",
+    ".env.example",
+    "install/",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

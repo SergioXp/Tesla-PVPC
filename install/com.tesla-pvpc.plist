@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tesla-pvpc.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/REPLACE_WITH_USER/Proyectos/tesla-pvpc/tesla_pvpc.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/REPLACE_WITH_USER/Proyectos/tesla-pvpc</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/tesla-pvpc.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/tesla-pvpc.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

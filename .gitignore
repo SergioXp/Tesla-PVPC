@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+venv/
+.venv/
+uv.lock
+*.log
+config.json
+!config.example.json
+.DS_Store
+Thumbs.db

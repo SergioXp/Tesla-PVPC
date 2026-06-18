@@ -1,0 +1,15 @@
+{
+    "max_price_cents_per_kwh": 10,
+    "max_charger_power_kw": 3.3,
+    "battery_capacity_kwh": 75,
+    "min_battery_pct": 70,
+    "target_time": "19:00",
+    "strict_mode": true,
+    "charging_efficiency": 0.9,
+    "check_interval_minutes": 15,
+    "telegram": {
+        "bot_token": "",
+        "chat_id": ""
+    },
+    "_comment": "Tokens go in .env, not here. See .env.example"
+}
