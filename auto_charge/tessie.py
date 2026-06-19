@@ -23,7 +23,8 @@ class VehicleState:
     @property
     def battery_pct(self) -> float:
         """Battery state of charge in percent (0-100)."""
-        return float(self._raw.get("charge_state", {}).get("battery_level", 0))
+        val = self._raw.get("charge_state", {}).get("battery_level", 0)
+        return 0.0 if val is None else float(val)
 
     @property
     def is_charging(self) -> bool:
@@ -39,12 +40,14 @@ class VehicleState:
     @property
     def charge_limit_pct(self) -> float:
         """Current charge limit set in the vehicle."""
-        return float(self._raw.get("charge_state", {}).get("charge_limit_soc", 100))
+        val = self._raw.get("charge_state", {}).get("charge_limit_soc", 100)
+        return 100.0 if val is None else float(val)
 
     @property
     def charger_power_kw(self) -> float:
         """Current charging power in kW."""
-        return float(self._raw.get("charge_state", {}).get("charger_power", 0))
+        val = self._raw.get("charge_state", {}).get("charger_power", 0)
+        return 0.0 if val is None else float(val)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

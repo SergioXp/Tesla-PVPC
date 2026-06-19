@@ -48,15 +48,10 @@ class TestVehicleState:
         assert vs.battery_pct == 0.0
 
     def test_battery_pct_none(self):
-        """None battery_level → TypeError (bug in production code).
-
-        This is a known bug: float(None) raises TypeError.
-        We document it here so the test shows the actual behavior.
-        """
+        """None battery_level → 0.0 (graceful fallback)."""
         raw = {"charge_state": {"battery_level": None}}
         vs = VehicleState(raw)
-        with pytest.raises(TypeError):
-            _ = vs.battery_pct
+        assert vs.battery_pct == 0.0
 
     def test_is_charging_true(self):
         """Charging state = 'Charging'."""
