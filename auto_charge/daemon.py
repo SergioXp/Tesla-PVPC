@@ -693,17 +693,17 @@ class AutoChargeDaemon:
             else:
                 parts.append("ejecutando plan")
         else:
-            if self._today_early_plan_done and self.current_plan is None:
-                parts.append("plan HOY sin slots")
-            elif not self._today_early_plan_done and now.hour < self.cfg.target_hour:
-                parts.append("planificando HOY...")
-            elif self.prices_fetched_today:
+            if self.prices_fetched_today:
                 if now.hour < self.cfg.target_hour:
                     parts.append("preparado (esperando ventana nocturna)")
                 elif not self.planned_today:
                     parts.append("planificando cruzando medianoche...")
                 else:
                     parts.append("esperando siguiente ciclo")
+            elif self._today_early_plan_done:
+                parts.append("plan HOY sin slots")
+            elif now.hour < self.cfg.target_hour:
+                parts.append("planificando HOY...")
             else:
                 parts.append("esperando precios mañana (20:15)")
         return " | ".join(parts) if parts else _t("daemon.waiting")

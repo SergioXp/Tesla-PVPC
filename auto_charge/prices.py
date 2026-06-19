@@ -70,8 +70,11 @@ def _parse_esios_response(data: dict) -> Dict[int, float]:
         dt_str = entry.get("datetime", "")
         try:
             dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        except ValueError:
-            dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            try:
+                dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
         prices[dt.astimezone(spain_tz).hour] = price_cents
     return prices
 
