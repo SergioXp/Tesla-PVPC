@@ -7,6 +7,7 @@ Non-sensitive settings (prices, times, etc.) go in config.json.
 import json
 import os
 import re
+import tempfile
 from typing import Any, Dict, List, Optional, Set
 
 try:
@@ -146,6 +147,28 @@ def _set_env_var(env_var: str, value: str) -> None:
         f.writelines(new_lines)
 
 
+def _atomic_write(path: str, data: dict) -> None:
+    """Write JSON data to a file atomically to prevent corruption on crash.
+
+    Writes to a temporary file in the same directory, then renames it
+    to the target path (rename is atomic on Unix).
+    """
+    dir_path = os.path.dirname(path) or "."
+    os.makedirs(dir_path, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except:
+        # Clean up temp file on any error
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 class Config:
     """Handles loading, saving, and accessing configuration."""
 
@@ -159,8 +182,15 @@ class Config:
 
         # 1. Load config.json if it exists
         if has_config_json:
-            with open(self._path, "r") as f:
-                user_config = json.load(f)
+            try:
+                with open(self._path, "r") as f:
+                    user_config = json.load(f)
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"❌ config.json has invalid JSON at line {e.lineno}, column {e.colno}: {e.msg}\n"
+                    f"   Run '--init' to recreate it or fix the file manually."
+                )
+                user_config = {}
             self._data.update(user_config)
 
         # 2. Migrate tokens from config.json → .env (secrets don't belong in config.json)
@@ -211,8 +241,7 @@ class Config:
             # Clean tokens from _data and save config.json without them
             self._strip_tokens()
             if os.path.exists(self._path):
-                with open(self._path, "w") as f:
-                    json.dump(self._strip_tokens_from_dict(dict(self._data)), f, indent=4, ensure_ascii=False)
+                _atomic_write(self._path, self._strip_tokens_from_dict(dict(self._data)))
 
     def _strip_tokens_from_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Remove secret keys from a config dict."""
@@ -283,8 +312,7 @@ class Config:
         """Persist non-sensitive config to config.json (tokens stay in .env)."""
         data_to_save = self._strip_tokens_from_dict(self._data)
         if data_to_save:
-            with open(self._path, "w") as f:
-                json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+            _atomic_write(self._path, data_to_save)
             logger.info("Configuration saved (tokens kept in .env).")
 
     # --- Getters ---
