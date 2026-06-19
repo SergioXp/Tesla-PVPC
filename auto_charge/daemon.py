@@ -16,7 +16,7 @@ from auto_charge.status import write_status
 
 from auto_charge.config import Config
 from auto_charge.prices import PriceProvider
-from auto_charge.planner import ChargePlanner, ChargingPlan
+from auto_charge.planner import ChargePlanner, ChargingPlan, ChargingSlot
 from auto_charge.telegram_bot import TelegramBot, build_bot
 from auto_charge.tessie import TessieClient
 from auto_charge.debug_tessie import DebugTessieClient
@@ -106,7 +106,7 @@ class AutoChargeDaemon:
             lines.append(f"  Esperado: {self.current_plan.expected_final_pct:.1f}%")
             lines.append(f"  Coste: {self.current_plan.total_cost_eur:.3f} €")
             for s in self.current_plan.slots:
-                lines.append(f"  ▸ {s.start_hour:02d}:00-{s.end_hour:02d}:00 ({s.kwh_to_deliver:.1f}kWh)")
+                lines.append(f"  ▸ {ChargingSlot._hour_label(s.start_hour)}-{ChargingSlot._hour_label(s.end_hour)} ({s.kwh_to_deliver:.1f}kWh)")
         else:
             lines.append("")
             lines.append("📋 Sin plan activo.")
@@ -114,8 +114,10 @@ class AutoChargeDaemon:
         return "\n".join(lines)
 
     def _cmd_force_plan(self) -> str:
-        self._fetch_prices()
-        self._create_plan()
+        now_h = now_spain().hour
+        wants_tomorrow = now_h >= self.cfg.target_hour
+        self._fetch_prices(include_tomorrow=wants_tomorrow)
+        self._create_plan(current_hour_override=now_h)
         if self.current_plan:
             return f"✅ Plan recalculado:\n{self.current_plan.summary()}"
         return "⚠️ No se pudo crear un plan."
@@ -227,23 +229,20 @@ class AutoChargeDaemon:
         if self._debug_mode:
             logger.info(f"[DEBUG] Tick at {now.strftime('%H:%M:%S')} | Day: {today}{' (NEW DAY)' if today != self._day_tracker else ''}")
 
-        # --- 2a. EARLY: Fetch today's prices and plan for TODAY's remaining hours ---
-        # Only do this once per day, when we're before the tomorrow-plan window (20:15)
+        # --- 2. Early: fetch today's prices (cached) and plan (before target_hour, all within today) ---
         if (not self._today_early_plan_done
                 and not self._debug_mode
-                and now.hour < 20
                 and now.hour < self.cfg.target_hour):
             logger.info(f"📅 Planificando para HOY ({today}) desde las {now.hour:02d}:00 hasta las {self.cfg.target_time}...")
-            today_prices = self.price_provider.fetch_daily_prices(today)
-            if today_prices and len(today_prices) >= 20:
-                self.prices = today_prices
-                self.prices_date = today
+            # Only fetch today's prices if not already cached (prices don't change once published)
+            if not self.prices or self.prices_date != today:
+                self._fetch_prices()
+            else:
+                logger.info(f"Usando precios de HOY en caché ({len(self.prices)}h).")
+            if self.prices:
                 self._create_plan(current_hour_override=now.hour)
                 if self.current_plan:
-                    source_label = {
-                        "esios": "ESIOS",
-                        "redata": "REData (mayorista)",
-                    }.get(self.price_provider.last_source, "desconocido")
+                    source_label = self.price_provider.last_source or "desconocido"
                     logger.info(f"📋 Plan para HOY desde las {now.hour:02d}:00: {len(self.current_plan.slots)} bloque(s)")
                     if self.cfg.telegram_enabled:
                         self.telegram.send_message(
@@ -252,23 +251,28 @@ class AutoChargeDaemon:
                             f"{self.current_plan.summary()}"
                         )
             else:
-                logger.warning(f"No se pudieron cargar precios de HOY ({today}). "
-                              "Se esperará a las 20:15 para los precios de mañana.")
+                logger.warning(f"No se pudieron cargar precios de HOY ({today}).")
             self._today_early_plan_done = True
 
-        # --- 2. Fetch tomorrow's prices at 20:15 (or any time in debug) ---
-        if self._debug_mode and not self.prices_fetched_today:
-            self._fetch_prices()
-        elif now.hour >= 20 and now.minute >= 15 and not self.prices_fetched_today:
-            self._fetch_prices()
+        # --- 3. Fetch tomorrow's prices at 20:15 (merge with today's, offset +24) ---
+        if not self.prices_fetched_today:
+            if self._debug_mode:
+                self._fetch_prices(include_tomorrow=True)
+            elif now.hour >= 20 and now.minute >= 15:
+                self._fetch_prices(include_tomorrow=True)  # Merge tomorrow with offset +24
 
-        # --- 3. Plan for tomorrow at 21:00 if prices are ready (or immediately in debug) ---
-        should_plan = now.hour >= 21 and not self.planned_today and bool(self.prices)
+        # --- 4. Plan cross-midnight (when past target_hour and tomorrow prices are ready) ---
+        should_plan = (
+            now.hour >= self.cfg.target_hour
+            and not self.planned_today
+            and bool(self.prices)
+        )
         if self._debug_mode and not self.planned_today and self.prices:
             should_plan = True
             logger.info("[DEBUG] Debug mode: triggering plan creation immediately.")
         if should_plan:
-            self._create_plan(current_hour_override=0)
+            start = now.hour  # May be past target_hour → planner handles wrap-around
+            self._create_plan(current_hour_override=start)
 
         # --- 4. Enforce the current plan ---
         if self.current_plan:
@@ -305,57 +309,50 @@ class AutoChargeDaemon:
     # Core logic
     # ------------------------------------------------------------------
 
-    def _fetch_prices(self) -> None:
-        """Fetch tomorrow's electricity prices from ESIOS."""
+    def _fetch_prices(self, include_tomorrow: bool = False) -> None:
+        """
+        Fetch today's electricity prices as base.
+
+        If include_tomorrow is True, also fetches tomorrow's prices and merges
+        them with offset +24 (tomorrow hour 0 → key 24, hour 1 → 25, etc.).
+        """
+        today = today_str()
         tomorrow = tomorrow_str()
 
-        if self._debug_mode:
-            logger.info(f"[DEBUG] _fetch_prices() called → target date: {tomorrow}")
-
-        if self.prices_date == tomorrow and self.prices:
-            logger.info("Prices for tomorrow already loaded.")
-            self.prices_fetched_today = True
+        # 1. Always fetch today's prices as base
+        today_prices = self.price_provider.fetch_daily_prices(today)
+        if not today_prices or len(today_prices) < 20:
+            logger.warning(f"Could not fetch today's prices ({today}).")
             return
 
-        prices = self.price_provider.fetch_daily_prices(tomorrow)
-        if prices and len(prices) >= 20:
-            self.prices = prices
-            self.prices_date = tomorrow
-            self.prices_fetched_today = True
+        prices: Dict[int, float] = dict(today_prices)  # hours 0-23
+        self.prices_date = today
+        merged_tomorrow = False
 
-            source_label = {
-                "esios": "ESIOS oficial",
-                "redata": "REData público (proxy mayorista)",
-            }.get(self.price_provider.last_source, self.price_provider.last_source)
-
-            if self._debug_mode:
-                cheapest = min(prices.values())
-                most_expensive = max(prices.values())
-                avg = sum(prices.values()) / len(prices)
-                logger.info(
-                    f"[DEBUG] Prices loaded from {source_label} for {tomorrow}: "
-                    f"min={cheapest:.1f}, max={most_expensive:.1f}, avg={avg:.1f} c/kWh"
-                )
-                for h in sorted(prices.keys()):
-                    logger.info(f"[DEBUG]   Hour {h:02d}:00 → {prices[h]:.2f} c/kWh")
+        # 2. If requested, also fetch tomorrow's prices and merge with offset 24
+        if include_tomorrow:
+            tomorrow_prices = self.price_provider.fetch_daily_prices(tomorrow)
+            if tomorrow_prices and len(tomorrow_prices) >= 20:
+                for h, price in tomorrow_prices.items():
+                    prices[h + 24] = price  # offset 24: tomorrow 00:00 = 24
+                logger.info(f"📅 Precios mañana ({tomorrow}) mergeados offset +24 ({len(tomorrow_prices)}h).")
+                merged_tomorrow = True
+                self.prices_fetched_today = True
             else:
-                logger.info(f"💰 Precios cargados desde {source_label} ({len(prices)}h).")
+                logger.warning(f"No se pudieron obtener precios de mañana ({tomorrow}).")
 
-            if self.cfg.telegram_enabled:
-                cheapest = min(prices.values())
-                most_expensive = max(prices.values())
-                avg = sum(prices.values()) / len(prices)
-                self.telegram.send_message(
-                    f"📊 *Precios para {tomorrow} ({source_label})*\n"
-                    f"Mín: {cheapest:.1f} c/kWh\n"
-                    f"Máx: {most_expensive:.1f} c/kWh\n"
-                    f"Media: {avg:.1f} c/kWh"
-                )
-        else:
-            logger.error(
-                f"Failed to fetch prices for {tomorrow} (got {len(prices)} hours). "
-                "Will retry next cycle."
-            )
+        self.prices = prices
+        source_label = self.price_provider.last_source or "desconocido"
+        vals = list(prices.values())
+        logger.info(f"💰 Precios cargados ({len(prices)}h, {source_label}): "
+                    f"min={min(vals):.1f}, max={max(vals):.1f}, avg={sum(vals)/len(vals):.1f} c/kWh")
+
+        if self.cfg.telegram_enabled:
+            msg = f"📊 *Precios cargados* ({source_label})\nHOY ({today}): {len(today_prices)}h"
+            if merged_tomorrow:
+                msg += f"\nMAÑANA ({tomorrow}): {len(tomorrow_prices)}h (offset +24)"
+            msg += f"\nMín: {min(vals):.1f} | Máx: {max(vals):.1f} c/kWh"
+            self.telegram.send_message(msg)
 
     def _create_plan(self, current_hour_override: Optional[int] = None) -> None:
         """Create a charging plan.
@@ -375,7 +372,8 @@ class AutoChargeDaemon:
         current_pct = state.battery_pct
         start_hour = current_hour_override if current_hour_override is not None else 0
 
-        label = "HOY" if start_hour > 0 else "MAÑANA"
+        is_cross_midnight = start_hour >= self.cfg.target_hour and start_hour > 0
+        label = "HOY→MAÑANA" if is_cross_midnight else ("HOY" if start_hour > 0 else "MAÑANA")
 
         if self._debug_mode:
             logger.info(
@@ -410,7 +408,7 @@ class AutoChargeDaemon:
                 for h in range(24):
                     ep = self.expected_by_hour.get(h)
                     if ep is not None and h <= self.cfg.target_hour:
-                        charging = "⚡" if any(s.start_hour <= h < s.end_hour for s in plan.slots) else "  "
+                        charging = "⚡" if any(self._slot_covers_hour(s, h) for s in plan.slots) else "  "
                         logger.info(f"[DEBUG]   {h:02d}:00 → {ep:.1f}% {charging}")
             else:
                 logger.info(f"📋 Plan de {label} creado: {len(plan.slots)} bloque(s) → "
@@ -431,23 +429,46 @@ class AutoChargeDaemon:
         starting_pct: float,
         date_str: str,
     ) -> None:
-        """Pre-compute expected battery % at each hour for progress tracking."""
+        """Pre-compute expected battery % at each hour for progress tracking.
+
+        Handles both today (0-23) and tomorrow (24+) slot hours.
+        Tomorrow's hours are mapped back to 0-23 for the expected_by_hour dict.
+        """
         self.expected_by_hour = {}
         capacity = self.cfg.battery_capacity_kwh
         pct = starting_pct
+        increment = (self.cfg.max_charger_power_kw * self.cfg.charging_efficiency / capacity) * 100.0
 
-        for h in range(24):
-            # Check if we're charging this hour
-            charging = False
-            for slot in plan.slots:
-                if slot.start_hour <= h < slot.end_hour:
-                    charging = True
-                    break
+        # Generate all absolute hours from start to end of plan
+        max_hour = 24
+        for slot in plan.slots:
+            if slot.end_hour > max_hour:
+                max_hour = slot.end_hour
 
+        for h in range(max_hour):
+            charging = any(
+                slot.start_hour <= h < slot.end_hour
+                for slot in plan.slots
+            )
             if charging:
-                pct += (self.cfg.max_charger_power_kw * self.cfg.charging_efficiency / capacity) * 100.0
+                pct += increment
+            # Store under the clock hour (0-23), overwriting for tomorrow's hours
+            clock_hour = h % 24
+            self.expected_by_hour[clock_hour] = min(pct, 100.0)
 
-            self.expected_by_hour[h] = min(pct, 100.0)
+    @staticmethod
+    def _slot_covers_hour(slot: ChargingSlot, current_hour: int) -> bool:
+        """Check if a slot covers a given Spanish hour (0-23).
+
+        Slots using 24+ offsets represent tomorrow's hours and are mapped
+        by adding 24 to the current hour for comparison.
+        """
+        if slot.start_hour < 24:
+            # Slot entirely within today (0-23)
+            return slot.start_hour <= current_hour < slot.end_hour
+        # Slot uses 24+ offsets (tomorrow): shift current_hour by +24
+        adjusted = current_hour + 24
+        return slot.start_hour <= adjusted < slot.end_hour
 
     def _enforce_plan(self, now: datetime) -> None:
         """Start or stop charging based on the current plan."""
@@ -457,11 +478,10 @@ class AutoChargeDaemon:
 
         current_hour = now.hour
 
-        charge_now = False
-        for slot in self.current_plan.slots:
-            if slot.start_hour <= current_hour < slot.end_hour:
-                charge_now = True
-                break
+        charge_now = any(
+            self._slot_covers_hour(slot, current_hour)
+            for slot in self.current_plan.slots
+        )
 
         if charge_now and state.is_plugged_in:
             if not state.is_charging:
@@ -635,10 +655,18 @@ class AutoChargeDaemon:
         if self.current_plan:
             current_hour = now.hour
             for slot in self.current_plan.slots:
-                if slot.start_hour > current_hour:
-                    slot_time = now.replace(hour=slot.start_hour, minute=0, second=0, microsecond=0)
-                    if slot_time > now:
-                        candidates.append(slot_time)
+                slot_start = slot.start_hour
+                # Handle 24+ offsets (tomorrow): shift to clock hour + 1 day
+                if slot_start >= 24:
+                    slot_start_clock = slot_start % 24
+                    days_ahead = slot_start // 24
+                    slot_time = (now + timedelta(days=days_ahead)).replace(
+                        hour=slot_start_clock, minute=0, second=0, microsecond=0
+                    )
+                else:
+                    slot_time = now.replace(hour=slot_start, minute=0, second=0, microsecond=0)
+                if slot_time > now:
+                    candidates.append(slot_time)
                     break  # Only the next slot matters
 
         if not candidates:
@@ -661,21 +689,23 @@ class AutoChargeDaemon:
                     next_slot = slot
                     break
             if next_slot:
-                parts.append(f"próxima carga {next_slot.start_hour:02d}:00")
+                parts.append(f"próxima carga {ChargingSlot._hour_label(next_slot.start_hour)}")
             else:
                 parts.append("ejecutando plan")
         else:
             if self._today_early_plan_done and self.current_plan is None:
-                parts.append(f"plan HOY sin slots disponibles")
-            elif not self._today_early_plan_done and now.hour < 20 and now.hour < self.cfg.target_hour:
-                parts.append(f"planificando HOY...")
+                parts.append("plan HOY sin slots")
+            elif not self._today_early_plan_done and now.hour < self.cfg.target_hour:
+                parts.append("planificando HOY...")
             elif self.prices_fetched_today:
-                if now.hour < 21:
-                    parts.append(f"plan MAÑANA a las 21:00")
+                if now.hour < self.cfg.target_hour:
+                    parts.append("preparado (esperando ventana nocturna)")
+                elif not self.planned_today:
+                    parts.append("planificando cruzando medianoche...")
                 else:
-                    parts.append("esperando plan")
+                    parts.append("esperando siguiente ciclo")
             else:
-                parts.append(f"precios MAÑANA a las 20:15")
+                parts.append("esperando precios mañana (20:15)")
         return " | ".join(parts) if parts else _t("daemon.waiting")
 
 

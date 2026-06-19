@@ -22,9 +22,18 @@ class ChargingSlot:
     def duration_hours(self) -> float:
         return float(self.end_hour - self.start_hour)
 
+    @staticmethod
+    def _hour_label(h: int) -> str:
+        day = h // 24
+        hour = h % 24
+        if day == 0:
+            return f"{hour:02d}:00"
+        return f"+{day}d {hour:02d}:00"
+
     def __repr__(self) -> str:
         return (
-            f"Slot({self.start_hour:02d}:00-{self.end_hour:02d}:00, "
+            f"Slot({self._hour_label(self.start_hour)}-"
+            f"{self._hour_label(self.end_hour)}, "
             f"{self.price_cents_per_kwh:.1f}c/kWh, {self.kwh_to_deliver:.1f}kWh)"
         )
 
@@ -112,9 +121,48 @@ class ChargePlanner:
 
         # Available hours: from current hour through target_hour-1
         # We include current_hour because it has not yet fully elapsed
-        available_window = [h for h in range(current_hour, target_hour)]
+        if current_hour < target_hour:
+            # All within the same day
+            available_window = list(range(current_hour, target_hour))
+        else:
+            # Wraps past midnight: today's remaining + tomorrow's early hours
+            # Tomorrow's hours use offset 24 (so 00:00 mañana = 24, 01:00 = 25, etc.)
+            available_window = list(range(current_hour, 24)) + list(range(24, 24 + target_hour))
+            logger.info(
+                f"🌙 Planning window wraps past midnight: "
+                f"{current_hour}:00 → 00:00 (+{24 - current_hour}h) → "
+                f"{self.cfg.target_time} (+{target_hour}h)"
+            )
+
         if not available_window:
             logger.warning("No time left before target! Cannot create a plan.")
+            return ChargingPlan(target_pct=target_pct, expected_final_pct=current_battery_pct)
+
+        # Cross-midnight check: if tomorrow prices are all sentinel, truncate to today
+        if current_hour >= target_hour:
+            tomorrow_window = [h for h in available_window if h >= 24]
+            real_tomorrow = [
+                h for h in tomorrow_window
+                if h in prices and prices[h] < _MISSING_PRICE_SENTINEL / 2
+            ]
+            if not real_tomorrow and tomorrow_window:
+                logger.warning(
+                    "🌙 Cross-midnight window detected but NO real tomorrow prices available. "
+                    f"Truncating plan to today's remaining hours ({current_hour}:00-23:00). "
+                    "Will re-plan when tomorrow prices are published."
+                )
+                available_window = list(range(current_hour, 24))
+                if not available_window:
+                    logger.warning("No hours left today either. Cannot create a plan.")
+                    return ChargingPlan(target_pct=target_pct, expected_final_pct=current_battery_pct)
+
+        # Check if we have real price data (not just the sentinel)
+        real_prices = [prices.get(h) for h in available_window if h in prices and prices[h] < _MISSING_PRICE_SENTINEL / 2]
+        if not real_prices:
+            logger.warning(
+                f"No real price data available for planning window. "
+                "Skipping plan to avoid using absurd sentinel prices."
+            )
             return ChargingPlan(target_pct=target_pct, expected_final_pct=current_battery_pct)
 
         # Filter and sort: prefer cheapest hours below max_price

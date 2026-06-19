@@ -58,27 +58,39 @@ def run_once(config, debug: bool = False, dry_run: bool = False, initial_battery
     planner = ChargePlanner(config)
 
     now = now_spain()
-    if now.hour >= 20 and now.minute >= 15:
-        plan_date = tomorrow_str()
-    else:
-        plan_date = today_str()
+    current_hour = now.hour
+    target_hour = config.target_hour
+    today = today_str()
+    tomorrow = tomorrow_str()
 
-    prices = price_provider.fetch_daily_prices(plan_date)
+    # Always fetch today's prices
+    prices = price_provider.fetch_daily_prices(today)
     if not prices:
-        logger.error(f"Failed to fetch prices for {plan_date}. Exiting.")
+        logger.error(f"Failed to fetch prices for today ({today}). Exiting.")
         return
+
+    # If planning window wraps past midnight, also fetch tomorrow's prices (offset +24)
+    if current_hour >= target_hour:
+        logger.info(f"🌙 Planning window wraps to tomorrow ({tomorrow}). Fetching tomorrow prices too...")
+        tomorrow_prices = price_provider.fetch_daily_prices(tomorrow)
+        if tomorrow_prices:
+            # Merge with offset 24 (tomorrow hour 0 → 24, hour 1 → 25, etc.)
+            for h, price in tomorrow_prices.items():
+                prices[h + 24] = price
+            logger.info(f"Merged {len(tomorrow_prices)} tomorrow prices (offset +24).")
+        else:
+            logger.warning(f"Could not fetch tomorrow prices ({tomorrow}). Will use today prices only.")
 
     state = tessie.get_state()
     if state is None:
         logger.error("Failed to get vehicle state. Exiting.")
         return
 
-    current_hour = now.hour
     plan = planner.plan(
         prices=prices,
         current_battery_pct=state.battery_pct,
         current_hour=current_hour,
-        date_str=plan_date,
+        date_str=today,
     )
 
     if not plan.slots:
@@ -88,7 +100,11 @@ def run_once(config, debug: bool = False, dry_run: bool = False, initial_battery
     logger.info(plan.summary())
 
     if state.is_plugged_in:
-        charge_now = any(s.start_hour <= now.hour < s.end_hour for s in plan.slots)
+        from auto_charge.daemon import AutoChargeDaemon
+        charge_now = any(
+            AutoChargeDaemon._slot_covers_hour(s, now.hour)
+            for s in plan.slots
+        )
         if charge_now and not state.is_charging:
             logger.info(f"Hour {now.hour}: starting charge.")
             tessie.start_charge()
@@ -256,8 +272,21 @@ def main() -> None:
         if daemon_pid:
             print(f"\n⚡  Daemon activo (PID {daemon_pid})")
             print(f"📋  Usa --dashboard, --prices, --show-config para ver el estado\n")
-        from auto_charge.interactive import main_menu
-        choice = main_menu()
+
+        # If --dashboard is set, skip the menu entirely
+        if args.dashboard:
+            if daemon_pid:
+                # Daemon ya corriendo: solo abrimos el dashboard
+                show_dashboard()
+                return
+            # Si no hay daemon, -b --dashboard: cae al modo daemon
+            if args.background:
+                choice = "daemon"
+            else:
+                choice = "exit"
+        else:
+            from auto_charge.interactive import main_menu
+            choice = main_menu()
 
         if choice == "exit":
             print(f"\n👋 {t('menu.exit')}.\n")
@@ -274,7 +303,12 @@ def main() -> None:
             run_interactive_edit(args.config)
             return
         elif choice == "monitor":
-            # Load config, create daemon, show monitor
+            # Check if daemon is running; if so, read its status file
+            from auto_charge.status import get_daemon_pid
+            if get_daemon_pid():
+                show_dashboard()
+                return
+            # No daemon running: load config and create a one-shot monitor
             try:
                 from auto_charge.config import Config
                 config = Config(args.config)
@@ -413,7 +447,9 @@ def show_prices() -> None:
     # Try daemon status first
     status = read_status()
     if status and status.get("prices"):
-        prices = {int(k): float(v) for k, v in status["prices"].items()}
+        # Filter out 24+ keys (tomorrow merged prices) — only show 0-23
+        raw = {int(k): float(v) for k, v in status["prices"].items()}
+        prices = {h: v for h, v in raw.items() if 0 <= h <= 23}
         date = status.get("prices_date", "desconocido")
         source = "daemon"
         age = status_age_seconds()
@@ -545,7 +581,7 @@ def show_dashboard() -> None:
                 "expected_pct": plan_raw.get("expected_pct"),
                 "target_time": status.get("config", {}).get("target_time", "?"),
                 "total_cost": plan_raw.get("total_cost_eur", "?"),
-                "slots": [f"{s['start']:02d}:00-{s['end']:02d}:00 ({s['kwh']:.1f}kWh)" for s in plan_raw.get("slots", [])],
+                "slots": [_format_slot_hours(s) for s in plan_raw.get("slots", [])],
             }
 
         ps = status.get("prices_summary", {})
@@ -562,6 +598,19 @@ def show_dashboard() -> None:
                 "_extra": extra}
 
     live_monitor(_dash_status)
+
+
+def _format_slot_hours(s: dict) -> str:
+    """Format a slot dict (with raw hour offsets) into a display string.
+
+    Handles 24+ hour offsets (tomorrow) by showing them as +1d HH:00.
+    Reuses ChargingSlot._hour_label from planner.py.
+    """
+    from auto_charge.planner import ChargingSlot
+    return (
+        f"{ChargingSlot._hour_label(s['start'])}-"
+        f"{ChargingSlot._hour_label(s['end'])} ({s['kwh']:.1f}kWh)"
+    )
 
 
 def show_config(config_path: str = CONFIG_PATH) -> None:
