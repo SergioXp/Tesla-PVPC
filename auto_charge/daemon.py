@@ -4,8 +4,10 @@ Fetches electricity prices, plans optimal charging, enforces the schedule,
 and provides Telegram-based remote control.
 """
 
+import atexit
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -21,6 +23,40 @@ from auto_charge.telegram_bot import TelegramBot, build_bot
 from auto_charge.tessie import TessieClient
 from auto_charge.debug_tessie import DebugTessieClient
 from auto_charge.utils import get_spain_tz, logger, mask_token, now_spain, today_str, tomorrow_str
+
+
+def _kill_all_tesla_pvpc_processes() -> None:
+    """Kill ALL tesla_pvpc.py processes. Registered as atexit fallback.
+
+    Uses SIGKILL directly (crash recovery only — graceful shutdown
+    already happened). Excludes the current process (can't suicide).
+    """
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"python.*tesla_pvpc"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            pids = [
+                int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip()
+                if int(p.strip()) != my_pid
+            ]
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+
+def _is_orphaned() -> bool:
+    """Check if this process's parent is init (PID 1), meaning we're orphaned."""
+    try:
+        return os.getppid() == 1
+    except AttributeError:
+        return False
 
 
 class AutoChargeDaemon:
@@ -66,8 +102,39 @@ class AutoChargeDaemon:
         write_status(daemon_pid=os.getpid(), daemon_mode="daemon")
 
     def _shutdown(self, signum: int = 0, frame: object = None) -> None:
-        logger.info("Shutting down Tesla-PVPC daemon...")
+        """Signal handler for SIGINT/SIGTERM.
+
+        Only sets running = False — does NOT run subprocess or I/O
+        (not async-signal-safe). The main loop handles cleanup after
+        this flag is set.
+        """
         self.running = False
+
+    def _cleanup_children(self) -> None:
+        """Kill any child processes left behind (forks from _daemonize, etc.).
+
+        Called from run() after the main loop exits — NOT from the signal
+        handler, because subprocess.run() is not async-signal-safe.
+        """
+        logger.info("🧹 Cleaning up child processes...")
+        try:
+            my_pid = os.getpid()
+            result = subprocess.run(
+                ["pgrep", "-P", str(my_pid)],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                child_pids = [
+                    int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip()
+                ]
+                for pid in child_pids:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        logger.info(f"  🧹 Child PID {pid} terminated.")
+                    except (ProcessLookupError, PermissionError):
+                        pass
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     # ------------------------------------------------------------------
     # Telegram callbacks
@@ -178,6 +245,13 @@ class AutoChargeDaemon:
 
     def run(self) -> None:
         """Run the daemon loop forever (or until shutdown)."""
+        # Register cleanup for crash scenarios
+        atexit.register(_kill_all_tesla_pvpc_processes)
+
+        # Detect orphan (parent died) and exit gracefully
+        if _is_orphaned():
+            logger.warning("Parent process died. Running as orphan. Will self-terminate on completion.")
+
         logger.info("=" * 50)
         logger.info("Tesla-PVPC daemon started.")
         logger.info(f"Target: {self.cfg.min_battery_pct}% by {self.cfg.target_time}")
@@ -205,8 +279,19 @@ class AutoChargeDaemon:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(30)
 
+        # Main loop exited (self.running = False) — clean up children
+        self._cleanup_children()
+        if self.cfg.telegram_enabled:
+            self.telegram.send_message("👋 Tesla-PVPC daemon *detenido*.")
+
     def _tick(self) -> None:
         """One iteration of the daemon loop."""
+        # Orphan detection: if parent is init (PID 1), we're orphaned → exit
+        if _is_orphaned():
+            logger.warning("☠️  Parent process died. Shutting down orphaned daemon.")
+            self.running = False
+            return
+
         now = now_spain()
         today = today_str()
         interval = self.cfg.check_interval_minutes

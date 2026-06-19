@@ -2,13 +2,14 @@
 """Tesla-PVPC - Optimize Tesla charging with Spanish electricity prices."""
 
 import argparse
+import atexit
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from auto_charge import __version__
 from auto_charge.config import CONFIG_PATH, DEFAULT_CONFIG, SECRET_KEYS
@@ -123,59 +124,77 @@ def run_once(config, debug: bool = False, dry_run: bool = False, initial_battery
 
 
 def _kill_existing_instances() -> None:
-    """Kill any other running instances of tesla_pvpc.py.
+    """Kill any other running instances of tesla_pvpc.py and their children.
 
-    Uses SIGTERM first, then waits briefly, then SIGKILL if still alive.
-    Only kills processes with a different PID (not itself).
+    Sends SIGTERM first, then SIGKILL after a short grace period.
+    NEVER kills the current process or its own process group.
+    Uses pgrep -P to also find orphaned child processes.
     """
     my_pid = os.getpid()
 
     try:
-        # Find all Python processes running tesla_pvpc (excluding this one)
+        # 1. Find all Python processes running tesla_pvpc (excluding this one)
         result = subprocess.run(
             ["pgrep", "-f", r"python.*tesla_pvpc"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.returncode != 0:
-            return  # No other instances found
+        if result.returncode == 0:
+            pids = [
+                int(p.strip())
+                for p in result.stdout.strip().split("\n")
+                if p.strip() and int(p.strip()) != my_pid
+            ]
+        else:
+            pids = []
 
-        pids = [
-            int(p.strip())
-            for p in result.stdout.strip().split("\n")
-            if p.strip() and int(p.strip()) != my_pid
-        ]
+        # 2. Also find children of this process (orphaned forks from _daemonize, etc.)
+        try:
+            child_result = subprocess.run(
+                ["pgrep", "-P", str(my_pid)],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if child_result.returncode == 0:
+                child_pids = [
+                    int(p.strip())
+                    for p in child_result.stdout.strip().split("\n")
+                    if p.strip() and int(p.strip()) not in pids
+                ]
+                pids.extend(child_pids)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
         if not pids:
             return
 
-        logger.info(f"🔫 Cerrando {len(pids)} instancia(s) previa(s) de Tesla-PVPC: {pids}")
+        logger.info(f"🔫 Cerrando {len(pids)} proceso(s): {pids}")
 
-        # SIGTERM first
+        # 3. SIGTERM each target (kill by PID only — NEVER by process group, which could self-kill)
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass  # Already dead
+            except (ProcessLookupError, PermissionError):
+                pass
 
-        # Wait briefly for graceful shutdown
+        # 4. Wait briefly for graceful shutdown
         time.sleep(1)
 
-        # SIGKILL any that are still alive
+        # 5. SIGKILL any that are still alive
         for pid in pids:
             try:
                 os.kill(pid, 0)  # Check if alive
                 os.kill(pid, signal.SIGKILL)
-                logger.info(f"  ✨ Instancia PID {pid} terminada.")
+                logger.info(f"  ✨ Proceso PID {pid} terminado.")
             except (ProcessLookupError, PermissionError):
                 pass  # Already dead or no permission
 
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        # pgrep might not exist on some systems; fall back silently
         pass
     except Exception as e:
-        logger.warning(f"Error al buscar/cerrar instancias previas: {e}")
+        logger.warning(f"Error al buscar/cerrar procesos previos: {e}")
 
 
 def _build_monitor_status_fn(config, daemon) -> callable:
@@ -410,12 +429,33 @@ def main() -> None:
 # =========================================================================
 
 
+_SPAWNED_PIDS: List[int] = []  # Track child PIDs for cleanup
+
+
+def _cleanup_child_processes() -> None:
+    """Kill any tracked child processes. Registered as atexit handler."""
+    for pid in list(_SPAWNED_PIDS):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.info(f"🧹 Limpiando proceso hijo PID {pid}")
+        except (ProcessLookupError, PermissionError):
+            pass
+    _SPAWNED_PIDS.clear()
+
+
+atexit.register(_cleanup_child_processes)
+
+
 def _daemonize() -> None:
-    """Fork the process to the background (Unix only)."""
+    """Fork the process to the background (Unix only).
+
+    Tracked via _SPAWNED_PIDS so atexit can clean up if main process dies.
+    """
     try:
         pid = os.fork()
         if pid > 0:
-            # Parent process: exit (terminal returns)
+            # Parent process: track child and exit
+            _SPAWNED_PIDS.append(pid)
             sys.stdout.write(f"  PID: {pid}\n")
             sys.stdout.write(f"  Usa --prices, --dashboard, --show-config para ver el estado\n")
             sys.stdout.write(f"  Para pararlo: kill {pid} o pkill -f tesla_pvpc\n")
@@ -428,7 +468,6 @@ def _daemonize() -> None:
         if pid2 > 0:
             sys.exit(0)
     except AttributeError:
-        # os.fork() doesn't exist on Windows
         logger.warning("Background mode no soportado en Windows. Ejecutando en primer plano.")
     except OSError:
         logger.warning("No se pudo lanzar en background. Ejecutando en primer plano.")
