@@ -132,8 +132,10 @@ class ChargePlanner:
         expensive_hours.sort(key=lambda x: x[1])
 
         # Build the schedule
+        # Pick the cheapest hours needed (limit to hours_needed, not all cheap hours)
         selected_hours: List[int] = []
-        selected_hours.extend(h for h, _ in cheap_hours)
+        needed_from_cheap = min(hours_needed, len(cheap_hours))
+        selected_hours.extend(h for h, _ in cheap_hours[:needed_from_cheap])
 
         if strict and len(selected_hours) < hours_needed:
             # Strict mode: add more expensive hours to meet the target
@@ -147,8 +149,8 @@ class ChargePlanner:
         # Sort selected hours chronologically
         selected_hours.sort()
 
-        # Group consecutive hours into slots
-        slots = self._group_into_slots(selected_hours, prices, power_kw)
+        # Group consecutive hours into slots (cap kWh to what's actually needed)
+        slots = self._group_into_slots(selected_hours, prices, power_kw, kwh_needed)
 
         # Calculate summary
         total_kwh = sum(s.kwh_to_deliver for s in slots)
@@ -173,23 +175,28 @@ class ChargePlanner:
         hours: List[int],
         prices: Dict[int, float],
         power_kw: float,
+        kwh_needed: float,
     ) -> List[ChargingSlot]:
-        """Group consecutive hours into ChargingSlot objects."""
+        """Group consecutive hours into ChargingSlot objects, distributing remaining energy."""
         if not hours:
             return []
 
         slots: List[ChargingSlot] = []
         start = hours[0]
         prev = start
+        remaining = kwh_needed
 
         for h in hours[1:]:
             if h == prev + 1:
                 prev = h
             else:
-                slots.append(self._make_slot(start, prev + 1, prices, power_kw))
+                slot = self._make_slot(start, prev + 1, prices, power_kw, remaining)
+                remaining -= slot.kwh_to_deliver
+                slots.append(slot)
                 start = h
                 prev = h
-        slots.append(self._make_slot(start, prev + 1, prices, power_kw))
+        slot = self._make_slot(start, prev + 1, prices, power_kw, remaining)
+        slots.append(slot)
         return slots
 
     def _make_slot(
@@ -198,10 +205,12 @@ class ChargePlanner:
         end: int,
         prices: Dict[int, float],
         power_kw: float,
+        remaining_kwh: float,
     ) -> ChargingSlot:
         hours_in_slot = end - start
         efficiency = self.cfg.charging_efficiency
-        kwh = hours_in_slot * power_kw * efficiency
+        max_kwh = hours_in_slot * power_kw * efficiency
+        kwh = min(max_kwh, remaining_kwh) if remaining_kwh > 0 else 0.0
         avg_price = sum(prices.get(h, _MISSING_PRICE_SENTINEL) for h in range(start, end)) / hours_in_slot
         return ChargingSlot(
             start_hour=start,
