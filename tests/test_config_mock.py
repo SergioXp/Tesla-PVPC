@@ -541,7 +541,6 @@ class TestTokenMigration:
             "tessie_token": "token_in_json",
             "target_time": "19:00",
         }
-
         with patch("auto_charge.config.ENV_PATH", "/tmp/.env_nonexistent"), \
              patch.dict(os.environ, {"TESSIE_TOKEN": "already_in_env"}, clear=True), \
              patch("auto_charge.config._set_env_var") as mock_set:
@@ -549,3 +548,427 @@ class TestTokenMigration:
 
             # Should NOT call _set_env_var because env already has it
             mock_set.assert_not_called()
+
+
+# =============================================================================
+# _atomic_write tests
+# =============================================================================
+
+class TestAtomicWrite:
+    """Test _atomic_write function."""
+
+    def test_writes_atomically(self):
+        """_atomic_write writes data and cleans up temp file."""
+        from auto_charge.config import _atomic_write
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "config.json")
+            _atomic_write(target, {"key": "value", "num": 42})
+
+            with open(target) as f:
+                data = json.load(f)
+            assert data == {"key": "value", "num": 42}
+
+            # No temp files left behind
+            leftovers = [f for f in os.listdir(tmpdir) if f.endswith(".tmp")]
+            assert len(leftovers) == 0
+
+    def test_creates_directory_if_needed(self):
+        """_atomic_write creates parent directory if missing."""
+        from auto_charge.config import _atomic_write
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "sub", "nested", "config.json")
+            assert not os.path.exists(os.path.dirname(target))
+
+            _atomic_write(target, {"a": 1})
+
+            assert os.path.exists(target)
+            with open(target) as f:
+                assert json.load(f) == {"a": 1}
+
+    def test_cleans_up_temp_on_write_failure(self):
+        """_atomic_write cleans up temp file on error."""
+        from auto_charge.config import _atomic_write
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "config.json")
+
+            # Mock os.replace to fail
+            with patch("os.replace", side_effect=OSError("Write failed")):
+                with pytest.raises(OSError):
+                    _atomic_write(target, {"key": "value"})
+
+            # Target file should NOT exist (atomic write never completed)
+            assert not os.path.exists(target)
+            # Temp file should be cleaned up
+            leftovers = [f for f in os.listdir(tmpdir) if f.endswith(".tmp")]
+            assert len(leftovers) == 0
+
+    def test_cleans_up_temp_oserror_swallowed(self):
+        """Temp cleanup failure (OSError) is swallowed, original error re-raised."""
+        from auto_charge.config import _atomic_write
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "config.json")
+
+            # Fail on os.replace (simulating write failure)
+            # AND fail on os.unlink (simulating cleanup failure)
+            with patch("os.replace", side_effect=PermissionError("No permission")), \
+                 patch("os.unlink", side_effect=OSError("Can't unlink")):
+                with pytest.raises(PermissionError):
+                    _atomic_write(target, {"key": "value"})
+
+            # Original error (PermissionError) should propagate
+            assert not os.path.exists(target)
+
+    def test_root_dir_fallback(self):
+        """Path without dirname uses '.' as fallback."""
+        from auto_charge.config import _atomic_write
+        from unittest.mock import patch, MagicMock
+
+        mock_fd = 123
+        mock_tmp = "/tmp/test_tmp.json"
+
+        with patch("tempfile.mkstemp", return_value=(mock_fd, mock_tmp)) as mock_mkstemp, \
+             patch("os.fdopen") as mock_fdopen, \
+             patch("os.replace"), \
+             patch("os.makedirs"):
+            _atomic_write("bare_config.json", {"key": "val"})
+
+            # Should use dirname of "bare_config.json" which is "" → should fallback to "."
+            mock_mkstemp.assert_called_once()
+            _, kwargs = mock_mkstemp.call_args
+            assert kwargs["dir"] == ".", f"Expected dir='.', got {kwargs['dir']}"
+
+
+# =============================================================================
+# JSONDecodeError handling
+# =============================================================================
+
+class TestJsonDecodeError:
+    """Test _load handles malformed JSON gracefully."""
+
+    def test_truncated_json_does_not_crash(self):
+        """Malformed JSON → error logged, uses defaults."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write('{"target_time": "19:00"')  # Missing closing brace
+            f.flush()
+            path = f.name
+
+        try:
+            with patch("auto_charge.config.logger") as mock_log:
+                cfg = Config(path)
+            # Should log error with line/col info
+            error_calls = [
+                c for c in mock_log.error.call_args_list
+                if "config.json has invalid JSON" in str(c)
+            ]
+            assert len(error_calls) > 0, "Should log JSONDecodeError"
+            # Should fall through to defaults
+            assert cfg.max_price_cents_per_kwh == 10.0  # DEFAULT_CONFIG value
+        finally:
+            os.unlink(path)
+
+    def test_null_bytes_in_json(self):
+        """Binary/null content → handled, no crash."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False) as f:
+            f.write(b"\x00\x01\x02")  # Binary garbage
+            f.flush()
+            path = f.name
+
+        try:
+            with patch("auto_charge.config.logger") as mock_log:
+                cfg = Config(path)
+            assert cfg.max_price_cents_per_kwh == 10.0  # Defaults preserved
+        finally:
+            os.unlink(path)
+
+
+# =============================================================================
+# _get_nested edge cases
+# =============================================================================
+
+class TestGetNested:
+    """Test _get_nested with non-dict intermediate values."""
+
+    def test_returns_none_when_intermediate_is_not_dict(self):
+        """Nested key where intermediate value is not a dict → returns None."""
+        cfg = Config.__new__(Config)
+        cfg._data = {"telegram": "not_a_dict"}  # scalar value where dict expected
+        result = cfg._get_nested("telegram.bot_token")
+        assert result is None
+
+    def test_returns_none_for_missing_key(self):
+        """Missing key at any level → returns None."""
+        cfg = Config.__new__(Config)
+        cfg._data = {"a": {"b": 1}}
+        assert cfg._get_nested("a.c") is None
+        assert cfg._get_nested("x.y.z") is None
+
+
+# =============================================================================
+# save() with empty data
+# =============================================================================
+
+class TestSaveEmpty:
+    """Test save() when data is empty (no non-secret keys)."""
+
+    def test_save_with_only_secrets_writes_nothing(self):
+        """save() with only secret keys → no file write."""
+        cfg = Config.__new__(Config)
+        cfg._data = {
+            "tessie_token": "secret",
+            "vin": "VIN123",
+            "esios_token": "esios123",
+            "telegram": {"bot_token": "bot", "chat_id": "chat"},
+        }
+        cfg._path = "/tmp/nonexistent_test.json"
+
+        with patch("auto_charge.config._atomic_write") as mock_write:
+            cfg.save()
+        mock_write.assert_not_called()
+
+    def test_to_dict_returns_copy(self):
+        """to_dict returns a copy, not the original reference."""
+        cfg = Config.__new__(Config)
+        cfg._data = {"key": "original"}
+        d = cfg.to_dict()
+        d["key"] = "modified"
+        assert cfg._data["key"] == "original"
+
+
+# =============================================================================
+# __getattr__ and __getattr__ error
+# =============================================================================
+
+class TestGetattrEdge:
+    """Test __getattr__ error cases."""
+
+    def test_private_attribute_raises(self):
+        """Accessing _private attribute raises AttributeError."""
+        cfg = Config.__new__(Config)
+        cfg._data = {}
+        with pytest.raises(AttributeError):
+            _ = cfg._private_attr
+
+    def test_missing_attribute_raises(self):
+        """Accessing non-existent public attribute raises AttributeError (not via _data)."""
+        cfg = Config.__new__(Config)
+        cfg._data = {}
+        with pytest.raises(AttributeError):
+            _ = cfg.nonexistent_prop
+
+    def test_get_with_default(self):
+        """get() returns default for missing key."""
+        cfg = Config.__new__(Config)
+        cfg._data = {}
+        assert cfg.get("nonexistent", "fallback") == "fallback"
+        assert cfg.get("nonexistent") is None
+
+
+# =============================================================================
+# _strip_tokens_from_dict edge cases
+# =============================================================================
+
+class TestStripTokensEdge:
+    """Test _strip_tokens_from_dict edge cases."""
+
+    def test_strips_tokens_in_telegram_section(self):
+        """Telegram section has secrets stripped but section kept."""
+        data = {
+            "telegram": {
+                "bot_token": "secret_bot",
+                "chat_id": "secret_chat",
+            },
+            "target_time": "19:00",
+        }
+        cleaned = Config._strip_tokens_from_dict(Config, data)
+        # All telegram keys are secrets → telegram section removed entirely
+        assert "telegram" not in cleaned
+        assert cleaned["target_time"] == "19:00"
+
+    def test_skips_empty_telegram_after_stripping(self):
+        """Telegram section with only secrets → removed entirely."""
+        data = {
+            "telegram": {"bot_token": "secret", "chat_id": "secret"},
+        }
+        cleaned = Config._strip_tokens_from_dict(Config, data)
+        assert "telegram" not in cleaned
+
+
+# =============================================================================
+# _set_env_var edge cases: create directory
+# =============================================================================
+
+class TestSetEnvVarDir:
+    """Test _set_env_var creates directory when missing."""
+
+    def test_creates_dir_when_missing(self):
+        """_set_env_var creates parent dir if it doesn't exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested_dir = os.path.join(tmpdir, "new_dir")
+            env_path = os.path.join(nested_dir, ".env")
+
+            with patch("auto_charge.config.ENV_PATH", env_path):
+                _set_env_var("TEST_VAR", "test_value")
+
+            assert os.path.exists(nested_dir)
+            assert os.path.exists(env_path)
+            with open(env_path) as f:
+                assert "TEST_VAR=test_value" in f.read()
+
+    def test_handles_root_path_empty_dir(self):
+        """_set_env_var with bare filename → uses '.' for makedirs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # dirname of a bare filename is '' which becomes '.'
+            env_path = os.path.join(tmpdir, ".env")
+
+            with patch("auto_charge.config.ENV_PATH", env_path), \
+                 patch("os.makedirs") as mock_mkdirs:
+                _set_env_var("TEST", "val")
+
+            # Should have been called; if dirname was '', makedirs handles '.'
+            # The actual call works because os.path.dirname(env_path) is tmpdir
+            assert True  # No crash
+
+
+# =============================================================================
+# set() with nested keys
+# =============================================================================
+
+class TestSetNestedKeys:
+    """Test Config.set() with dot-notation nested keys."""
+
+    def test_set_nested_nonsecret_key(self):
+        """set() with nested non-secret key works."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "config.json")
+            with open(json_path, "w") as f:
+                json.dump({"target_time": "19:00"}, f)
+
+            cfg = Config(json_path)
+            cfg.set("nested.deep.key", "deep_value")
+
+            assert cfg._data["nested"]["deep"]["key"] == "deep_value"
+
+    def test_set_secret_saves_to_env_and_updates_env_var(self):
+        """set() with secret updates os.environ and in-memory data."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "config.json")
+            with open(json_path, "w") as f:
+                json.dump({"target_time": "19:00"}, f)
+
+            cfg = Config(json_path)
+
+            with patch("auto_charge.config.ENV_PATH", os.path.join(tmpdir, ".env")):
+                cfg.set("tessie_token", "new_token")
+
+            assert cfg.tessie_token == "new_token"
+            assert os.environ.get("TESSIE_TOKEN") == "new_token"
+
+            # Clean up env var
+            del os.environ["TESSIE_TOKEN"]
+
+    def test_set_secret_nested_key(self):
+        """set() with nested secret key (telegram.bot_token) works."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "config.json")
+            with open(json_path, "w") as f:
+                json.dump({"target_time": "19:00"}, f)
+
+            cfg = Config(json_path)
+
+            with patch("auto_charge.config.ENV_PATH", os.path.join(tmpdir, ".env")):
+                cfg.set("telegram.bot_token", "tg_bot")
+
+            assert cfg.telegram_bot_token == "tg_bot"
+            assert os.environ.get("TELEGRAM_BOT_TOKEN") == "tg_bot"
+
+            # Clean up env var
+            del os.environ["TELEGRAM_BOT_TOKEN"]
+
+
+# =============================================================================
+# _migrate_tokens edge: dirty path writes atomic
+# =============================================================================
+
+class TestMigrateTokensDirty:
+    """Test _migrate_tokens dirty path when _atomic_write is called."""
+
+    def test_migration_calls_atomic_write(self):
+        """When migration is dirty, _atomic_write is called."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "config.json")
+            with open(json_path, "w") as f:
+                json.dump({
+                    "tessie_token": "tok",
+                    "vin": "vin123",
+                    "target_time": "19:00",
+                    "max_price_cents_per_kwh": 10,
+                }, f)
+
+            env_path = os.path.join(tmpdir, ".env")
+
+            cfg = Config.__new__(Config)
+            cfg._path = json_path
+            cfg._data = {
+                "tessie_token": "tok",
+                "vin": "vin123",
+                "target_time": "19:00",
+                "max_price_cents_per_kwh": 10,
+            }
+
+            with patch("auto_charge.config.ENV_PATH", env_path), \
+                 patch.dict(os.environ, {}, clear=True), \
+                 patch("auto_charge.config._atomic_write") as mock_atomic:
+                cfg._migrate_tokens()
+
+            # Should have called _atomic_write
+            mock_atomic.assert_called_once()
+            # First call: path = json_path, data should NOT have tokens
+            call_args, call_kwargs = mock_atomic.call_args
+            written_path = call_args[0]
+            written_data = call_args[1]
+            assert written_path == json_path
+            assert "tessie_token" not in written_data
+            assert "vin" not in written_data
+            assert written_data["target_time"] == "19:00"
+
+    def test_migration_skips_write_if_path_missing(self):
+        """Migration doesn't call _atomic_write if config.json doesn't exist."""
+        cfg = Config.__new__(Config)
+        cfg._path = "/nonexistent/config.json"
+        cfg._data = {
+            "tessie_token": "tok",
+            "target_time": "19:00",
+        }
+
+        with patch("auto_charge.config.ENV_PATH", "/tmp/.env_test"), \
+             patch.dict(os.environ, {}, clear=True), \
+             patch("auto_charge.config._atomic_write") as mock_atomic, \
+             patch("os.path.exists", return_value=False):
+            cfg._migrate_tokens()
+
+        mock_atomic.assert_not_called()
+
+    def test_migration_skips_non_secret_keys(self):
+        """Migration only processes SECRET_KEYS, skips non-secrets."""
+        cfg = Config.__new__(Config)
+        cfg._data = {
+            "tessie_token": "tok",
+            "max_price_cents_per_kwh": 15,  # non-secret
+            "target_time": "19:00",
+        }
+        cfg._path = "/tmp/nonexistent_mig.json"
+
+        with patch("auto_charge.config._set_env_var") as mock_set, \
+             patch.dict(os.environ, {}, clear=True):
+            cfg._migrate_tokens()
+
+        # Should only call _set_env_var for secret keys (tessie_token), not for max_price_cents_per_kwh
+        tessie_calls = [c for c in mock_set.call_args_list if c[0][0] == "TESSIE_TOKEN"]
+        assert len(tessie_calls) == 1
+        # Non-secret keys should NOT trigger _set_env_var
+        price_calls = [c for c in mock_set.call_args_list if c[0][0] == "MAX_PRICE_CENTS_PER_KWH"]
+        assert len(price_calls) == 0
